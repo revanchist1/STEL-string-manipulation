@@ -1,0 +1,288 @@
+library(readxl)
+library(randomForest)
+library(caret)
+library(plyr)
+library(formattable)
+library(ROCR)
+library(inTrees)
+library(stringi)
+library(stringr)
+library(mice)
+set.seed(0)
+
+# Step 3: Feature selection and hyperparameter tuning 
+# Step 6: Calculate Intrees results from the random forest results at each loop. 
+#         The results must be calculated inside the same iteration for consistency. 
+#         Have global parameters that you can vary so you get consistent estimates. 
+# Step 7: Print out results of each iteration at the very end. 
+#     7a) Generalized estimate of Random Forest Performance 
+#     7b) Generalized estimate of inTrees Performance 
+#     7c) 10 different models of patient information 
+
+# User defined functions:
+
+# Parameters and featuresto play with
+# Start at 2. No 13,15, or 16
+rf = list(2,3,4,5,6,7,8,9,10,11,12,14,17,18)
+m_trees = 3
+max_decay = 0.025; 
+max_depth = 3;
+
+#81.21  72.33
+#89.53  78.21
+
+calculate_metrics <- function(ypred, yprob, yt){
+  # Making the confusion matrix 
+  cm = table(ypred, yt)
+  tot = cm[1,1] + cm[1,2] + cm[2,1] + cm[2,2]
+  tp = cm[2,2]
+  tn = cm[1,1]
+  fp = cm[2,1]
+  fn = cm[1,2]
+  accu = (tp + tn)/(tot)
+  prec = tp/(tp + fp)
+  reca = tp/(tp + fn)
+  falsePosRate = fp/(fp + tn)
+  falseNegRate = fn/(fn + tp)
+  f1 = 2*prec*reca/(prec+reca)
+  
+  AUC <- NULL
+  
+  if (!is.null(yprob)){
+    pred = prediction(as.double(yprob), as.double(yt))
+    perf_AUC = performance(pred, "auc")
+    AUC = perf_AUC@y.values[[1]]
+  }
+  
+  newList <- list("accu" =accu, "prec" = prec, "reca" = reca, "falsePosRate" = falsePosRate, "falseNegRate" = falseNegRate, "f1" = f1, "auc" = AUC)
+  return(newList)
+}
+
+# I'm calculating the probability of the positive class 
+calculate_probabilities <- function(X, rules_item){
+  rules = rules_item
+  len_vector <- as.integer(rules[,1])
+  rules_vector <- rules[,4]
+  pred_vector <- as.integer(rules[,5])
+  
+  probs <- list()
+  
+  for (a in 1:dim(X)[1]){
+    prob = 0;
+    
+    for (i in 1:length(len_vector)){
+      pred = pred_vector[i]
+      
+      conditions <- get_conditions(len_vector[i], rules_vector[i])
+      
+      # Loop through each condition 
+      is_condition_true = TRUE
+      
+      for(j in 1:length(conditions$cols)){
+          col = as.integer(conditions$cols[j])
+          thr = as.double(conditions$thresh[j])
+          
+          if (grepl(conditions$ops[j], "<=")){
+            is_condition_true = (X[a,col] <= thr)
+          } else if (grepl(conditions$ops[j], "<")) {
+            is_condition_true = (X[a,col] < thr)
+          } else if (grepl(conditions$ops[j], ">")) {
+            is_condition_true = (X[a,col] > thr)
+          }
+          
+          if (is_condition_true == FALSE){
+            break
+          }
+      }
+      
+      # If I make it to this point with is_condition_true = TRUE, then I know all conditions were met 
+      # Otherwise, at least one of the conditions didn't hold. 
+      if (pred == 4 & is_condition_true == TRUE){
+        prob = prob + 1/length(len_vector)
+      } else if (pred == 0 & is_condition_true == FALSE){
+        prob = prob + 1/length(len_vector)
+      }
+    }
+    probs[a] <- prob
+  }
+  return(probs)
+}
+
+get_conditions <- function(num, rule){
+  # num: Number of conditions 
+  # rule: Concatenated string of all conditinos 
+  # pred: If all conditions in the rule are true, this is the result 
+  
+  cond_cols = list() # Relevant column of X for each string 
+  cond_operation = list() # Operation (lt, gt, le)
+  cond_thresh = list() # Threshold of condition
+
+  conds = stri_split_fixed(rule, "&")
+  c = conds[[1]]
+  
+  for (j in 1:num){
+    # Trim whitespace
+    c[j] = str_trim(c[j]) 
+    
+    # Get the column number
+    cond_cols[j] <- sub(".*, *(.*?) *].*", "\\1", c[j]) 
+    
+    # Get the operation and the threshold 
+    if (grepl("<=", c[j])){
+      cond_operation[j] = "<="
+      s = stri_split_fixed(c[j], "<=")
+      cond_thresh[j] = s[[1]][2]
+    } else if (grepl("<", c[j])) {
+      cond_operation[j] = "<"
+      s = stri_split_fixed(c[j], "<")
+      cond_thresh[j] = s[[1]][2]
+    } else if (grepl(">", c[j])) {
+      cond_operation[j] = ">"
+      s = stri_split_fixed(c[j], ">")
+      cond_thresh[j] = s[[1]][2]
+    }
+    
+  }
+  conditions <- list("cols" = cond_cols, "ops" = cond_operation, "thresh" = cond_thresh)
+  return(conditions)
+}
+
+############### MAIN ##################
+
+# Step 1: Importing the data 
+dataset <- as.data.frame(read_excel("C:\\Users\\Soren\\Desktop\\Thesis\\Data Analysis\\withPlatelets.xlsx"))
+dataset <- as.data.frame(dataset[1:30])
+dataset <- dataset[sample(nrow(dataset), replace = FALSE),] # Randomly re-order the data
+dataset$Age = as.numeric(dataset$Age)
+dataset$Sex = as.numeric(dataset$Sex)
+
+# Step 2: Splitting the data into 10 folds 
+k = 10
+dataset$id <- sample(1:k, nrow(dataset), replace = TRUE)
+list <- 1:k
+
+# Global vectors to store performance of random forest and intrees
+rfc_f1s = list(); rfc_precs = list(); rfc_recs = list(); rfc_accs = list(); rfc_fps = list(); rfc_fns = list(); rfc_aucs = list(); 
+stl_f1s = list(); stl_precs = list(); stl_recs = list(); stl_accs = list(); stl_fps = list(); stl_fns = list(); stl_aucs = list(); 
+stl_rules = list(); stl_rules2 = list();
+
+# Progress bar to track CV
+progress.bar <- create_progress_bar("text")
+progress.bar$init(k)
+
+for (i in 1:k){
+  # Remove rows with id i from dataframe to create training set 
+  # Select rows with id i to create the test set
+  
+  trainingSet <- subset(dataset, id %in% list[-i])
+  testSet <- subset(dataset, id %in% c(i))
+  
+  Xp_tr = trainingSet[as.integer(rf)]
+  Xp_ts = testSet[as.integer(rf)]
+  Yp_tr = as.factor(as.character(trainingSet$ClassificationFibrosis))
+  Yp_ts = as.factor(as.character(testSet$ClassificationFibrosis))
+  
+  # Step 3; Impute the missing data
+  if (5 %in% rf){
+    Xp_tr$ALP = ifelse(is.na(Xp_tr$ALP), ave(Xp_tr$ALP, FUN = function(x) mean(x, na.rm = TRUE)), Xp_tr$ALP)
+    Xp_ts$ALP = ifelse(is.na(Xp_ts$ALP), ave(Xp_tr$ALP, FUN = function(x) mean(x, na.rm = TRUE)), Xp_ts$ALP)
+  }
+  
+  if (9 %in% rf){
+    Xp_tr$Creatinine = ifelse(is.na(Xp_tr$Creatinine),ave(Xp_tr$Creatinine, FUN = function(x) mean(x, na.rm = TRUE)), Xp_tr$Creatinine)
+    Xp_ts$Creatinine = ifelse(is.na(Xp_ts$Creatinine),ave(Xp_tr$Creatinine, FUN = function(x) mean(x, na.rm = TRUE)), Xp_ts$Creatinine)
+  }
+  
+  if (10 %in% rf){
+    Xp_tr$INR = ifelse(is.na(Xp_tr$INR), ave(Xp_tr$INR, FUN = function(x) mean(x, na.rm = TRUE)), Xp_tr$INR)
+    Xp_ts$INR = ifelse(is.na(Xp_ts$INR), ave(Xp_tr$INR, FUN = function(x) mean(x, na.rm = TRUE)), Xp_ts$INR)
+  }  
+  
+  if (12 %in% rf){
+    Xp_tr$BMI = ifelse(is.na(Xp_tr$BMI), ave(Xp_tr$BMI, FUN = function(x) mean(x, na.rm = TRUE)), Xp_tr$BMI)
+    Xp_ts$BMI = ifelse(is.na(Xp_ts$BMI), ave(Xp_tr$BMI, FUN = function(x) mean(x, na.rm = TRUE)), Xp_ts$BMI)
+  }
+  
+  # Fit random Forest Algorithm to the training set
+  clf = randomForest(x = Xp_tr, Yp_tr, ntree = 500, importance = TRUE, mtry = m_trees)
+  Y_label_pred_rfc = predict(clf, newdata = Xp_ts)
+  Y_proba_pred_rfc = predict(clf, newdata = Xp_ts, type="prob")
+  
+  # Intrees algorithm 
+  treeList = RF2List(clf)
+  ruleExec <- extractRules(treeList, Xp_tr, ntree = 500, maxdepth=max_depth)
+  ruleMetric <- getRuleMetric(ruleExec,Xp_tr,Yp_tr)
+  ruleMetric <- pruneRule(ruleMetric, Xp_tr, Yp_tr, maxDecay=max_decay)
+  ruleMetric <- selectRuleRRF(ruleMetric, Xp_tr, Yp_tr)
+  learner <- buildLearner(ruleMetric, Xp_tr, Yp_tr)
+  Y_label_pred_int <- applyLearner(learner, Xp_ts)
+  Y_proba_pred_int <- calculate_probabilities(Xp_ts, ruleMetric)
+  read <- presentRules(learner, colnames(Xp_tr))
+  stl_rules[[i]] <- read
+  stl_rules2[[i]] <- ruleMetric
+  
+  # Calculate performances 
+  rfc_performance <- calculate_metrics(Y_label_pred_rfc, Y_proba_pred_rfc[,2],Yp_ts)
+  stl_performance <- calculate_metrics(Y_label_pred_int, Y_proba_pred_int, Yp_ts)
+  
+  rfc_f1s[i] <- rfc_performance$f1
+  rfc_accs[i] <- rfc_performance$accu
+  rfc_fns[i] <- rfc_performance$falseNegRate
+  rfc_fps[i] <- rfc_performance$falsePosRate
+  rfc_precs[i] <- rfc_performance$prec
+  rfc_recs[i] <- rfc_performance$reca
+  rfc_aucs[i] <- rfc_performance$auc
+  
+  stl_f1s[i] <- stl_performance$f1
+  stl_accs[i] <- stl_performance$accu
+  stl_fns[i] <-  stl_performance$falseNegRate
+  stl_fps[i] <-  stl_performance$falsePosRate
+  stl_precs[i] <-stl_performance$prec
+  stl_recs[i] <- stl_performance$reca
+  stl_aucs[i] <- stl_performance$auc
+  
+  progress.bar$step()
+}
+
+rfc_f1s_m = round(mean(as.double(rfc_f1s))*100, digits=2); rfc_f1s_s = round(sd(as.double(rfc_f1s))*100, digits=2);
+rfc_recs_m = round(mean(as.double(rfc_recs))*100, digits=2); rfc_recs_s = round(sd(as.double(rfc_recs))*100, digits=2);
+rfc_precs_m = round(mean(as.double(rfc_precs))*100, digits=2);  rfc_precs_s = round(sd(as.double(rfc_precs))*100, digits=2);  
+rfc_accs_m = round(mean(as.double(rfc_accs))*100, digits=2); rfc_accs_s = round(sd(as.double(rfc_accs))*100, digits=2);
+rfc_fps_m = round(mean(as.double(rfc_fps))*100, digits=2); rfc_fps_s = round(sd(as.double(rfc_fps))*100, digits=2);
+rfc_fns_m = round(mean(as.double(rfc_fns))*100, digits=2); rfc_fns_s = round(sd(as.double(rfc_fns))*100, digits=2);
+rfc_aucs_m = round(mean(as.double(rfc_aucs))*100, digits=2); rfc_aucs_s = round(sd(as.double(rfc_aucs))*100, digits=2);
+
+rfc_f1s_sm = paste(toString(rfc_f1s_m), toString(rfc_f1s_s), sep = " +/- ");
+rfc_recs_sm = paste(toString(rfc_recs_m), toString(rfc_recs_s), sep = " +/- ");
+rfc_precs_sm = paste(toString(rfc_precs_m), toString(rfc_precs_s), sep = " +/- ");
+rfc_accs_sm = paste(toString(rfc_accs_m), toString(rfc_accs_s), sep = " +/- ");
+rfc_fps_sm = paste(toString(rfc_fps_m), toString(rfc_fps_s), sep = " +/- ");
+rfc_fns_sm = paste(toString(rfc_fns_m), toString(rfc_fns_s), sep = " +/- ");
+rfc_aucs_sm = paste(toString(rfc_aucs_m), toString(rfc_aucs_s), sep = " +/- ");
+
+stl_f1s_m = round(mean(as.double(stl_f1s))*100, digits=2); stl_f1s_s = round(sd(as.double(stl_f1s))*100, digits=2);
+stl_recs_m = round(mean(as.double(stl_recs))*100, digits=2); stl_recs_s = round(sd(as.double(stl_recs))*100, digits=2);
+stl_precs_m = round(mean(as.double(stl_precs))*100, digits=2);  stl_precs_s = round(sd(as.double(stl_precs))*100, digits=2);  
+stl_accs_m = round(mean(as.double(stl_accs))*100, digits=2); stl_accs_s = round(sd(as.double(stl_accs))*100, digits=2);
+stl_fps_m = round(mean(as.double(stl_fps))*100, digits=2); stl_fps_s = round(sd(as.double(stl_fps))*100, digits=2);
+stl_fns_m = round(mean(as.double(stl_fns))*100, digits=2); stl_fns_s = round(sd(as.double(stl_fns))*100, digits=2);
+stl_aucs_m = round(mean(as.double(stl_aucs))*100, digits=2); stl_aucs_s = round(sd(as.double(stl_aucs))*100, digits=2);
+
+stl_f1s_sm = paste(toString(stl_f1s_m), toString(stl_f1s_s), sep = " +/- ");
+stl_recs_sm = paste(toString(stl_recs_m), toString(stl_recs_s), sep = " +/- ");
+stl_precs_sm = paste(toString(stl_precs_m), toString(stl_precs_s), sep = " +/- ");
+stl_accs_sm = paste(toString(stl_accs_m), toString(stl_accs_s), sep = " +/- ");
+stl_fps_sm = paste(toString(stl_fps_m), toString(stl_fps_s), sep = " +/- ");
+stl_fns_sm = paste(toString(stl_fns_m), toString(stl_fns_s), sep = " +/- ");
+stl_aucs_sm = paste(toString(stl_aucs_m), toString(stl_aucs_s), sep = " +/- ");
+
+Metric = c("F1", "Recall", "Precision", "Accuracy", "FalsePosRate", "FalseNegRate", "AUROC")
+RFC = c(rfc_f1s_sm, rfc_recs_sm, rfc_precs_sm, rfc_accs_sm, rfc_fps_sm, rfc_fns_sm, rfc_aucs_sm)
+STEL = c(stl_f1s_sm, stl_recs_sm, stl_precs_sm, stl_accs_sm, stl_fps_sm, stl_fns_sm, stl_aucs_sm)
+
+performance <- data.frame(Metric, RFC, STEL)
+formattable(performance)
+
+# Print the rules
+print(stl_rules)
+
