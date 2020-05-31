@@ -286,3 +286,21 @@ formattable(performance)
 # Print the rules
 print(stl_rules)
 
+# Sample output: 
+# Rules:
+#      condition                                                     pred
+# [1,] "ALP>145"                                                   				    "4" 
+# [2,] "Sex>0.5 & AST>27.5 & INR<=1.015"                             			    "0" 
+# [3,] "Age<=61.5 & ALP<=135 & ALT>33.5 & Platelets>172.5"            		    "0" 
+# [4,] "Age>46.5 & Sex<=0.5 & ALP>98.5"                              			    "4" 
+# [5,] "Creatinine>74.5 & Platelets<=189.5 & BMI>24.7497663147062"   		      "4" 
+# [6,] "Age<=56.5 & Bilirubin<=16.5 & Platelets>187.5"               			    "0" 
+# [7,] "ALP<=91 & ALT>29.5 & Bilirubin>16.5 & BMI<=24.7933103116914" 	 	      "0" 
+# [8,] "INR>1.045"                                                   					"4" 
+# [9,] "Age<=65.5 & Age>45 & Sex>0.5 & Varices<=0.5"                 			    "0" 
+# [10,] "Age>46.5 & Bilirubin>9.5"                                    				"4" 
+# [11,] "INR<=0.975 & INR>0.93 & SclerosingCholangitis<=0.5"          		    "0" 
+# [12,] "ALP<=102.5 & Creatinine<=95.5 & Platelets>111.5"             			  "0" 
+# [13,] "Else"                                                        			  "4" 
+                                    
+
